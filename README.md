@@ -1,335 +1,186 @@
-# k_catjob — Catalytic Converter Job (QBCore)
+# k_catjob – Catalytic Converter Job & Scrapper Shop
 
-A QBCore job where players talk to an NPC to:
-- Start a **catalytic converter theft contract**, or
-- Open a **shop** to buy job-related items.
+QBCore job where players talk to an NPC to:
+- Start a catalytic converter theft job (specific parked car)
+- Open a scrapper shop
+- Check their XP / level
 
-Players get:
-- A **search-area zone** on the map (radius blip) where a target vehicle is parked.
-- A **locked** vehicle spawned from a tiered vehicle list.
-- A long **progressbar** interaction to cut the converter (no skillcheck).
-- **One converter per car** plus level-scaled material rewards and XP.
-- A **bottom-center popup** showing XP earned and level-up info.
-- **ps-dispatch** alert (linked to ps-mdt) as soon as someone starts cutting.
-
----
-
-## Requirements
-
-- QBCore framework
-- `qb-target`
-- `qb-inventory` (or compatible inventory using the same NUI images path)
-- `ps-dispatch` (for police alerts)
-- `ps-mdt` (optional, integrates via ps-dispatch metadata)
-- A valid `vehicles.lua` list included with this resource
-
----
-
-## Files / Structure
-
-```text
-k_catjob/
-├── fxmanifest.lua
-├── config.lua
-├── client/
-│   └── main.lua
-├── server/
-│   └── main.lua
-├── data/
-│   └── vehicles.lua        # Tiered vehicle list used for jobs
-├── items/
-│   └── items.lua           # Item definitions snippet for qb-core/shared/items.lua
-└── html/
-    ├── index.html          # Modern UI (Job / Shop / XP)
-    ├── style.css
-    └── app.js
-```
+Now includes:
+- **Custom sleek NUI** (no more qb-menu) with tabs:
+  - Job
+  - Shop
+  - Progress
+- Shop items with **item icons based on the image from qb-inventory**.
+- ps-ui circle minigame as the skillcheck
+- ps-dispatch CustomAlert hook that shows in ps-mdt
+- XP system stored in QBCore metadata
+- Level-gated shop items
+- Material rewards scaling with level
 
 ---
 
 ## Installation
 
-1. **Place the resource**
+1. Drop the `k_catjob` folder into your server resources:
+   - `resources/[qb]/k_catjob` (or similar)
 
-   Drop the `k_catjob` folder into your server resources:
-   ```text
-   resources/[qb]/k_catjob
-   ```
+2. Add this to your `server.cfg` after qb-core and dependencies:
 
-2. **Add to server.cfg**
+```cfg
+ensure qb-core
+ensure qb-target
+ensure qb-menu
+ensure qb-inventory
+ensure ps-ui
+ensure ps-dispatch
+ensure ps-mdt
+ensure k_catjob
+```
 
-   ```cfg
-   ensure k_catjob
-   ```
-
-3. **Add items to QBCore**
-
-   Open `qb-core/shared/items.lua` and copy the entries from:
-
-   ```text
-   k_catjob/items/items.lua
-   ```
-
-   Make sure the `image` names match icons that exist in:
-   ```text
-   qb-inventory/html/images/
-   ```
-
-   Required items generally include (names may vary based on your edits):
-
-   - `catsaw`               – tool used to cut converters
-   - `catalytic_converter`  – main loot item
-   - `scrapmetal`, `copper`, `steel` – material rewards
-
-4. **Vehicle list**
-
-   The script uses a **tiered vehicle list** defined in:
-
-   ```text
-   k_catjob/data/vehicles.lua
-   ```
-
-   That file should define a global `CatJobVehicles` table, for example:
-
-   ```lua
-   CatJobVehicles = {
-       [1] = {
-           label  = "Low Tier",
-           models = { "blista", "asea", "panto" }
-       },
-       [2] = {
-           label  = "Mid Tier",
-           models = { "sultan", "kuruma" }
-       },
-       [3] = {
-           label  = "High Tier",
-           models = { "comet2", "schafter3" }
-       },
-   }
-   ```
-
-   The script **does not** pull directly from config vehicle models; it reads from this list and picks tiers based on player level.
-
-5. **Dependencies**
-
-   Make sure these are running and named exactly:
-
-   - `qb-core`
-   - `qb-target`
-   - `qb-inventory`
-   - `ps-dispatch`
-   - `ps-mdt` (optional, but expected if you want MDT hooks from dispatch)
+> The NUI uses `qb-inventory` item images via: `nui://qb-inventory/html/images/<imageName>.png`
 
 ---
 
-## Configuration
+## Required Items
 
-All configurable options are in `config.lua`.
+The resource includes an `items/items.lua` file with:
 
-### NPC
+- `catsaw`
+- `catalytic_converter`
+- `scrapmetal`
+- `copper`
+- `steel`
 
-```lua
-Config.NPC = {
-    model = 's_m_y_dealer_01',
-    coords = vector4(123.45, -1034.21, 29.28, 180.0), -- CHANGE to your desired location
-    scenario = 'WORLD_HUMAN_CLIPBOARD',
-}
-```
+They are formatted like standard qb-core items so you can paste/merge them into `qb-core/shared/items.lua`.
 
-Set the NPC’s position and model wherever you want players to start the job / open the shop.
+Make sure the images exist in `qb-inventory/html/images/`:
 
-### Job Zone / Search Radius
+- `catsaw.png`
+- `catalytic_converter.png`
+- `scrapmetal.png`
+- `copper.png`
+- `steel.png`
 
-```lua
-Config.Job = {
-    BlipSprite   = 1,
-    BlipColor    = 5,
-    BlipText     = 'Target Area',
-    SearchRadius = 75.0,  -- meters
-    Spots = {
-        vector4(426.77, -1028.45, 28.90, 88.0),
-        -- add more vector4(x, y, z, heading)
-    },
-}
-```
-
-- Each `Spot` is where a **locked vehicle** can spawn.
-- The blip is a **radius** centered on that spot; the car is somewhere inside.
-- No route is set; players must search the area.
-
-### Rewards & XP
-
-```lua
-Config.Rewards = {
-    ConverterItem = 'catalytic_converter',
-    MinConverters = 1, -- kept for compatibility; server logic forces 1
-    MaxConverters = 1,
-    BaseMats      = 1, -- base materials before scaling
-    Materials = {
-        'scrapmetal',
-        'copper',
-        'steel',
-    }
-}
-
-Config.XP = {
-    MinXPPerJob = 10,
-    MaxXPPerJob = 25,
-    Levels = {
-        [1] = 0,
-        [2] = 100,
-        [3] = 250,
-        [4] = 500,
-        [5] = 800,
-        [6] = 1200,
-    },
-    MaxLevel = 6,
-}
-```
-
-- Player XP is stored in metadata: `Player.PlayerData.metadata["catjob_xp"]`
-- Level determines:
-  - Which **tier** of cars they can get
-  - How many **materials** they receive (scaled with level & vehicle class)
-  - Which **shop items** are unlocked
-
-### Progressbar (cutting time)
-
-```lua
-Config.Progress = {
-    MinTimeMs = 15000,   -- minimum duration (ms)
-    MaxTimeMs = 25000,   -- maximum duration (ms)
-    Label     = 'Cutting Converter...',
-}
-```
-
-The script uses `QBCore.Functions.Progressbar` instead of any skillcheck.
-
-### Dispatch
-
-```lua
-Config.Dispatch = {
-    Enabled        = true,
-    AlertOnFail    = true,   -- still used if you want extra alerts on failures (not required)
-    AlertOnSuccess = false,  -- success-based alerts disabled by default
-    AlertChance    = 50,     -- percent chance to send an alert
-}
-```
-
-- **Important:** A `ps-dispatch` alert is triggered **as soon as the player starts using the saw** on the car (subject to `AlertChance`).
-- No more success-based or delayed-only alerts; the risk is front-loaded.
+(or change the image names in qb-core items if you use different ones).
 
 ---
 
-## How It Works (Gameplay)
+## UI Overview
 
-1. **Talk to NPC (qb-target)**
-   - 3rd eye the NPC, choose **“Talk to Scrapper”**.
-   - Opens the modern UI (Job / Shop / XP tabs).
+The NUI lives in `html/index.html` and is opened via qb-target on the scrapper NPC:
 
-2. **Start Job**
-   - In the **Job** tab, click **Start Job**.
-   - Server:
-     - Reads player XP → computes level.
-     - Picks a **vehicle tier** from `data/vehicles.lua`.
-     - Randomly picks a **Spot** from `Config.Job.Spots`.
-   - Client:
-     - Creates a **radius blip** at the spot (search area).
-     - Spawns the **locked** target vehicle at that location.
+- **Header bar**:
+  - Title + subtitle
+  - Compact XP bar and level indicator
+- **Tabs**:
+  - `Job` – contract info + "Start Job" button
+  - `Shop` – scrollable list of shop items
+    - Each row shows:
+      - Icon (from qb-inventory image)
+      - Name
+      - Price & required level
+      - Buy button
+  - `Progress` – XP & level summary cards
 
-3. **Find & Cut the Car**
-   - Player searches the **zone** for the parked job car.
-   - Use the `catsaw` item while near the car.
-   - As soon as the process starts:
-     - `ps-dispatch` alert is sent (if enabled + chance passes).
-   - A long **progressbar** runs while the player is “cutting”.
-
-4. **Rewards**
-   - On success:
-     - 1x `catalytic_converter` is given.
-     - Materials (`scrapmetal`, `copper`, `steel`, etc.) given based on:
-       - Player level
-       - Vehicle class (e.g., high-end cars give more)
-     - XP is granted & saved.
-   - The car is **not deleted**; it remains in the world, just locked.
-
-5. **XP Popup**
-   - On completion, a **bottom-center toast** appears:
-     - Shows `XP gained: <amount>`
-     - Adds `• Level up: X` if the player leveled.
-   - No item list is shown in the toast. Item rewards are visible via inventory / item boxes.
+The UI is dark, minimal, and built to look like a professional operations console rather than a native GTA popup.
 
 ---
 
-## Shop & Level Gating
+## How It Works
 
-Shop items are configured in `config.lua`:
+### Opening the UI
 
-```lua
-Config.ShopItems = {
-    {
-        name  = 'catsaw',
-        price = 1500,
-        amount = 10,
-        level = 1,
-        label = 'Converter Saw',
-    },
-    -- etc...
-}
-```
+- Player 3rd-eyes the scrapper NPC (via qb-target).
+- Client triggers `k-catjob:client:OpenMainMenu`, which:
+  - Calls `k-catjob:server:GetUIData` to fetch:
+    - XP, level, next XP threshold
+    - Visible shop items (respecting level requirements) plus image names
+  - Opens the NUI with that data.
 
-- Only items where `player_level >= item.level` are shown in the shop UI.
-- Each item displays an icon using:
-  ```text
-  nui://qb-inventory/html/images/<item.image or item.name>.png
-  ```
+### Starting a Job
 
----
+- In the **Job** tab, the player clicks **Start Job**.
+- NUI calls `nui_startJob` → client event `k-catjob:client:RequestJob`.
+- Server:
+  - Picks a random spot from `Config.Job.Spots`.
+  - Stores it in `ActiveJobs`.
+  - Sends the coords and index back to client.
+- Client:
+  - Creates a blip and GPS route to that exact parked car location.
 
-## UI / Controls
+### Cutting the Converter
 
-- **Open UI:** 3rd-eye the NPC → “Talk to Scrapper”.
-- **Tabs:**
-  - **Job:** Start/see status of current contract.
-  - **Shop:** Buy tools & materials (level-gated).
-  - **XP:** View XP, current level, and XP needed for next level.
-- **Close UI:** ESC or the “×” button in the top-right.
+- At the spot, player uses the `catsaw` item.
+- Client:
+  - Checks distance to job coords.
+  - Starts `ps-ui` circle minigame.
+- On success:
+  - Calls server `FinishJob`:
+    - Validates correct spot + proximity.
+    - Grants `catalytic_converter` and level-scaled materials.
+    - Adds XP, handles level-ups.
+    - Optionally triggers ps-dispatch / ps-mdt alert.
+- On fail:
+  - Job is cleared and can optionally ping dispatch (configurable).
 
----
+### Shop Icons
 
-## Event Reference
-
-### Client
-
-- `k-catjob:client:OpenMainMenu`
-- `k-catjob:client:OpenShop`
-- `k-catjob:client:ShowXP`
-- `k-catjob:client:RequestJob`
-- `k-catjob:client:AssignJob`
-- `k-catjob:client:ClearJob`
-- `k-catjob:client:UseSaw`
-- `k-catjob:client:ShowJobRewards`
-
-### Server
-
-- `k-catjob:server:RequestJob`
-- `k-catjob:server:FailJob`
-- `k-catjob:server:FinishJob`
-- `k-catjob:server:BuyItem`
-
-Callbacks:
-- `k-catjob:server:GetShopItems`
-- `k-catjob:server:GetXP`
-- `k-catjob:server:GetUIData`
+- Server-side callbacks consult `QBCore.Shared.Items[item.name].image` (or fall back to `<name>.png`).
+- NUI uses those values and renders icons like:
+  - `nui://qb-inventory/html/images/catsaw.png`
+- This keeps the shop visuals naturally in sync with whatever icons you use in your inventory.
 
 ---
 
-## Notes / Tips
+## Tweaks
 
-- If dispatch isn’t firing, make sure `ps-dispatch` is **started** and the resource name matches what this script expects.
-- If icons aren’t showing in the shop:
-  - Confirm the `image` property in `qb-core/shared/items.lua`.
-  - Confirm the corresponding `.png` exists in `qb-inventory/html/images/`.
-- You can safely tweak XP / rewards / search radius to tune risk vs reward.
+- Change NPC position and ped in `Config.NPC`.
+- Add / adjust contract vehicle spots in `Config.Job.Spots`.
+- Add more shop items or adjust level gates in `Config.ShopItems`.
+- Adjust ps-ui difficulty in `Config.PSUI`.
+- Tune dispatch behavior in `Config.Dispatch`.
 
-Enjoy ripping converters out of Los Santos in a more structured way. 🔧🚗
+Enjoy the new clean panel instead of the stock menu. :)
+
+
+### Better cars + more resources
+
+- The script now uses the **actual GTA vehicle class** (`GetVehicleClass`) of the car you hit.
+- All GTA vehicles are supported automatically – if it has a converter, you can try to take it.
+- Rewards scale with:
+  - **Your level** (XP): each level adds ~15% more payout.
+  - **Vehicle class**:
+    - Compacts / basic stuff → normal payout.
+    - Muscle / sports classics / sedans / SUVs / coupes → +25%.
+    - Sports / super cars → +50%.
+
+This scaling affects:
+- Number of converters you get.
+- Amount of materials you get.
+- XP you gain per successful job.
+
+
+## Vehicle list file (data/vehicles.lua)
+
+The cars the job system "targets" are now defined in a separate file:
+
+- `data/vehicles.lua`
+
+This file defines **tiers** of vehicle models:
+
+- Tier 1 – beaters / compacts
+- Tier 2 – sedans, SUVs, muscle
+- Tier 3 – high-end, sports & super
+
+On each job request the server:
+
+1. Looks up the player's **level**.
+2. Uses that to pick a **tier**.
+3. Picks a **random model** from that tier and stores it in the active job data.
+
+Right now the script still lets you cut converters from **any** nearby vehicle at the job location,
+but the tier/model is chosen from this file so you can:
+
+- Easily add **custom vehicles**.
+- Adjust how "good" the cars get as players level up.
+- Hook in future logic (e.g. actually spawning that exact model at the spot, logging, etc.).
