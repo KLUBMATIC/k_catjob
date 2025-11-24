@@ -3,14 +3,14 @@ Config = {}
 -- NPC that opens the Scrapper UI (Info / Shop / XP)
 Config.NPC = {
     model = 's_m_y_dealer_01',
-    coords = vector4(-1145.52, -1995.64, 13.16, 135.0),
+    coords = vector4(-1244.57, -2098.81, 13.92, 239.79),
     scenario = 'WORLD_HUMAN_CLIPBOARD',
 }
 
 -- Second NPC that buys catalytic converters for a small amount of materials
 Config.SellNPC = {
     model = 's_m_y_dealer_01',
-    coords = vector4(-467.76, -1715.25, 18.69, 104.0), -- near a scrapyard-style area
+    coords = vector4(-580.54, -1589.46, 26.75, 115.03), -- near a scrapyard-style area
     scenario = 'WORLD_HUMAN_CLIPBOARD',
 }
 
@@ -20,7 +20,7 @@ Config.RequiredToolItem = 'catsaw'
 -- Dispatch settings (ps-dispatch)
 Config.Dispatch = {
     Enabled     = true,
-    AlertChance = 60,    -- % chance alert fires when cutting starts
+    AlertChance = 100,    -- % chance alert fires when cutting starts
 }
 
 -- Database / anti-abuse checks
@@ -89,30 +89,7 @@ Config.ShopItems = {
         level = 1,
         image = 'catsaw.png',
     },
-    {
-        name  = 'scrapmetal',
-        label = 'Scrap Metal',
-        price = 50,
-        amount = 50,
-        level = 2,
-        image = 'scrapmetal.png',
-    },
-    {
-        name  = 'copper',
-        label = 'Copper',
-        price = 75,
-        amount = 50,
-        level = 3,
-        image = 'copper.png',
-    },
-    {
-        name  = 'steel',
-        label = 'Steel',
-        price = 100,
-        amount = 50,
-        level = 4,
-        image = 'steel.png',
-    },
+
 }
 
 -- Progressbar configuration for cutting time
