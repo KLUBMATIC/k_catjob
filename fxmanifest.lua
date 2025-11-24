@@ -1,29 +1,27 @@
 fx_version 'cerulean'
 game 'gta5'
 
+name 'k_catjob'
 author 'KLUBMATIC'
-description 'Catalytic Converter Scrapper Job'
-version '1.5.0'
+description 'Street catalytic converter theft system with XP, shop, ps-dispatch and anti-abuse.'
+version '1.0.0'
+
+lua54 'yes'
 
 ui_page 'html/index.html'
 
 files {
     'html/index.html',
+    'html/app.js',
     'html/style.css',
-    'html/app.js'
 }
 
-shared_scripts {
-    '@qb-core/shared/locale.lua',
-    'config.lua',
-    'data/vehicles.lua',
-}
+shared_script 'config.lua'
 
 client_scripts {
-    'client/main.lua',
+    'client/*.lua',
 }
 
 server_scripts {
-    '@qb-core/server/export.lua',
-    'server/main.lua',
+    'server/*.lua',
 }
