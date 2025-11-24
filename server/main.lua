@@ -1,6 +1,47 @@
 local QBCore = exports['qb-core']:GetCoreObject()
 
-local ActiveJobs = {}  -- [citizenid] = { spotIndex, coords (vector3), targetModel, tierIndex, tierLabel }
+-- Table to track which plates have already been stripped recently
+local StrippedVehicles = {}
+-- Table to track per-player cooldowns (by citizenid)
+local PlayerCooldowns = {}
+
+-- Ensure config tables exist with sane defaults
+Config = Config or {}
+
+Config.DB = Config.DB or {}
+Config.DB.VehicleTable       = Config.DB.VehicleTable or 'player_vehicles'
+Config.DB.OwnedVehicleCheck  = Config.DB.OwnedVehicleCheck ~= false  -- default true unless explicitly false
+
+Config.StripCooldownSeconds  = Config.StripCooldownSeconds or (6 * 3600) -- 6 hours default
+Config.BlacklistedClasses    = Config.BlacklistedClasses or { 18 }       -- emergency by default
+Config.PlayerCooldownSeconds = Config.PlayerCooldownSeconds or 60        -- per-player "blade hot" cooldown in seconds
+
+Config.Rewards = Config.Rewards or {}
+Config.Rewards.ConverterItem = Config.Rewards.ConverterItem or 'catalytic_converter'
+Config.Rewards.BaseMats      = Config.Rewards.BaseMats or 1
+Config.Rewards.Materials     = Config.Rewards.Materials or { 'scrapmetal', 'copper', 'steel' }
+
+Config.XP = Config.XP or {}
+Config.XP.MinXPPerJob = Config.XP.MinXPPerJob or 10
+Config.XP.MaxXPPerJob = Config.XP.MaxXPPerJob or 25
+Config.XP.Levels      = Config.XP.Levels or {
+    [1] = 0,
+    [2] = 100,
+    [3] = 250,
+    [4] = 500,
+    [5] = 800,
+    [6] = 1200,
+}
+Config.XP.MaxLevel    = Config.XP.MaxLevel or 6
+
+Config.ShopItems = Config.ShopItems or {}
+
+Config.Sell = Config.Sell or {}
+Config.Sell.Enabled       = Config.Sell.Enabled ~= false
+Config.Sell.ConverterItem = Config.Sell.ConverterItem or Config.Rewards.ConverterItem or 'catalytic_converter'
+Config.Sell.MinDirtyPer   = Config.Sell.MinDirtyPer or 1
+Config.Sell.MaxDirtyPer   = Config.Sell.MaxDirtyPer or Config.Sell.MinDirtyPer
+Config.Sell.DirtyItem     = Config.Sell.DirtyItem or 'inkedbills'
 
 -- ========= XP HELPERS =========
 
@@ -31,35 +72,12 @@ local function GetNextLevelXP(xp)
     local currentLevel = GetLevelFromXP(xp)
     local nextLevel = currentLevel + 1
     if not Config.XP.Levels[nextLevel] then
-        return nil -- max level
+        return nil -- max level reached
     end
     return Config.XP.Levels[nextLevel]
 end
 
--- ========= VEHICLE LIST / TIERS =========
-local VehicleTiers = CatJobVehicles or {}
-
-local function GetTierForLevel(level)
-    if level >= 5 then
-        return 3
-    elseif level >= 3 then
-        return 2
-    else
-        return 1
-    end
-end
-
-local function PickVehicleModelForLevel(level)
-    local tierIndex = GetTierForLevel(level)
-    local tier = VehicleTiers[tierIndex]
-    if not tier or not tier.models or #tier.models == 0 then
-        return nil, tierIndex
-    end
-    local idx = math.random(1, #tier.models)
-    return tier.models[idx], tierIndex
-end
-
--- ========= VEHICLE CLASS / REWARD SCALING =========
+-- ========= REWARD SCALING (BASED ON VEHICLE CLASS + LEVEL) =========
 
 local function GetClassTier(vehClass)
     if vehClass == 6 or vehClass == 7 then
@@ -90,118 +108,156 @@ local function GetRewardMultiplier(level, vehClass)
     return levelBonus * classBonus
 end
 
--- ========= JOB LOGIC =========
+-- ========= ANTI-ABUSE HELPERS =========
 
-RegisterNetEvent('k-catjob:server:RequestJob', function()
-    local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
-    if not Player then return end
-
-    local cid = Player.PlayerData.citizenid
-
-    if ActiveJobs[cid] then
-        TriggerClientEvent('QBCore:Notify', src, "You already have a job.", 'error')
-        return
+local function IsClassBlacklisted(vehClass)
+    for _, cls in ipairs(Config.BlacklistedClasses) do
+        if vehClass == cls then
+            return true
+        end
     end
+    return false
+end
 
-    if not Config.Job or not Config.Job.Spots or #Config.Job.Spots == 0 then
-        TriggerClientEvent('QBCore:Notify', src, "No job spots configured.", 'error')
-        return
-    end
+local function NormalizePlate(plate)
+    plate = plate or ''
+    plate = plate:gsub('%s+', '')
+    return plate:upper()
+end
 
-    local xp = GetXPFromMeta(Player)
-    local level = GetLevelFromXP(xp)
-    local targetModel, tierIndex = PickVehicleModelForLevel(level)
+local function IsPlateOnCooldown(plate)
+    plate = NormalizePlate(plate)
+    local ts = StrippedVehicles[plate]
+    if not ts then return false end
 
-    local tierLabel
-    if VehicleTiers[tierIndex] and VehicleTiers[tierIndex].label then
-        tierLabel = VehicleTiers[tierIndex].label
+    local now = os.time()
+    if now - ts < Config.StripCooldownSeconds then
+        return true
     else
-        tierLabel = ("Tier %s"):format(tostring(tierIndex or "?"))
+        StrippedVehicles[plate] = nil
+        return false
+    end
+end
+
+local function MarkPlateStripped(plate)
+    plate = NormalizePlate(plate)
+    StrippedVehicles[plate] = os.time()
+end
+
+local function IsVehicleOwned(plate)
+    if not Config.DB.OwnedVehicleCheck then return false end
+    if not MySQL or not MySQL.scalar then return false end
+
+    plate = NormalizePlate(plate)
+    local query = ('SELECT 1 FROM %s WHERE plate = ? LIMIT 1'):format(Config.DB.VehicleTable)
+    local result = nil
+
+    local ok, err = pcall(function()
+        result = MySQL.scalar.await(query, { plate })
+    end)
+
+    if not ok then
+        print('[k_catjob] DB error when checking owned vehicle: ' .. tostring(err))
+        return false
     end
 
-    local spotIndex = math.random(1, #Config.Job.Spots)
-    local spot = Config.Job.Spots[spotIndex]
-    local coords = vector3(spot.x, spot.y, spot.z)
+    return result ~= nil
+end
 
-    ActiveJobs[cid] = {
-        spotIndex   = spotIndex,
-        coords      = coords,
-        targetModel = targetModel,
-        tierIndex   = tierIndex,
-        tierLabel   = tierLabel,
-    }
+-- Per-player cooldown helpers (by citizenid)
+local function IsPlayerOnCooldown(citizenid)
+    if not citizenid then return false end
+    local ts = PlayerCooldowns[citizenid]
+    if not ts then return false end
 
-    TriggerClientEvent('k-catjob:client:AssignJob', src, {
-        coords      = { x = spot.x, y = spot.y, z = spot.z, w = spot.w },
-        spotIndex   = spotIndex,
-        targetModel = targetModel,
-        tierIndex   = tierIndex,
-        tierLabel   = tierLabel,
-    })
+    local now = os.time()
+    if now - ts < Config.PlayerCooldownSeconds then
+        return true
+    else
+        PlayerCooldowns[citizenid] = nil
+        return false
+    end
+end
+
+local function SetPlayerCooldown(citizenid)
+    if not citizenid then return end
+    PlayerCooldowns[citizenid] = os.time()
+end
+
+-- ========= SERVER CALLBACK: CAN STRIP? (BLADE HEAT) =========
+
+QBCore.Functions.CreateCallback('k-catjob:server:CanStrip', function(source, cb)
+    local src = source
+    local Player = QBCore.Functions.GetPlayer(src)
+    if not Player then
+        cb(false, "Something went wrong.")
+        return
+    end
+
+    local citizenid = Player.PlayerData.citizenid
+    if IsPlayerOnCooldown(citizenid) then
+        cb(false, "Your blade is too hot to cut right now. Let it cool down.")
+        return
+    end
+
+    cb(true)
 end)
 
-RegisterNetEvent('k-catjob:server:FailJob', function()
+-- ========= STRIP VEHICLE EVENT =========
+
+RegisterNetEvent('k-catjob:server:StripVehicle', function(plate, vehClass)
     local src = source
     local Player = QBCore.Functions.GetPlayer(src)
     if not Player then return end
 
-    local cid = Player.PlayerData.citizenid
-    if not ActiveJobs[cid] then return end
-
-    ActiveJobs[cid] = nil
-    TriggerClientEvent('k-catjob:client:ClearJob', src)
-    TriggerClientEvent('QBCore:Notify', src, "You failed to steal the converter.", 'error')
-end)
-
-RegisterNetEvent('k-catjob:server:FinishJob', function(spotIndex, vehCoords, vehClass)
-    local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
-    if not Player then return end
-
+    plate = plate or ''
     vehClass = vehClass or 0
 
-    local cid = Player.PlayerData.citizenid
-    local jobData = ActiveJobs[cid]
-    if not jobData then
-        TriggerClientEvent('QBCore:Notify', src, "You do not have an active job.", 'error')
+    local citizenid = Player.PlayerData.citizenid
+
+    -- 0) Per-player cooldown check (double-check in case someone bypassed the callback)
+    if IsPlayerOnCooldown(citizenid) then
+        TriggerClientEvent('QBCore:Notify', src, "Your blade is too hot to cut right now. Let it cool down.", 'error')
         return
     end
 
-    if jobData.spotIndex ~= spotIndex then
-        TriggerClientEvent('QBCore:Notify', src, "This is not the correct car.", 'error')
+    -- 1) Basic sanity
+    if plate == '' then
+        TriggerClientEvent('QBCore:Notify', src, "Unable to identify vehicle plate.", 'error')
         return
     end
 
-    local jobCoords = jobData.coords
-    local dist = #(jobCoords - vector3(vehCoords.x, vehCoords.y, vehCoords.z))
-    if dist > 10.0 then
-        TriggerClientEvent('QBCore:Notify', src, "You are too far from the target vehicle.", 'error')
+    -- 2) Disallow emergency / blacklisted classes
+    if IsClassBlacklisted(vehClass) then
+        TriggerClientEvent('QBCore:Notify', src, "You can't strip this kind of vehicle.", 'error')
         return
     end
 
-    ActiveJobs[cid] = nil
-    TriggerClientEvent('k-catjob:client:ClearJob', src)
+    -- 3) Disallow owned vehicles (optional DB-backed check)
+    if IsVehicleOwned(plate) then
+        TriggerClientEvent('QBCore:Notify', src, "You can't strip converters from owned vehicles.", 'error')
+        return
+    end
 
+    -- 4) Per-plate cooldown to avoid farming the same vehicle
+    if IsPlateOnCooldown(plate) then
+        TriggerClientEvent('QBCore:Notify', src, "This vehicle's converter has already been removed.", 'error')
+        return
+    end
+
+    MarkPlateStripped(plate)
+
+    -- 5) Calculate rewards & XP
     local xp = GetXPFromMeta(Player)
     local level = GetLevelFromXP(xp)
     local mult = GetRewardMultiplier(level, vehClass)
 
-    -- Track rewards for UI summary
-    local rewardsSummary = {}
-
-    local function addReward(name, amount)
-        if not name or amount <= 0 then return end
-        rewardsSummary[name] = (rewardsSummary[name] or 0) + amount
-    end
-
-    -- Converters: always exactly 1 per car
+    -- Converters: always exactly 1 per vehicle
     local converterItem = Config.Rewards.ConverterItem
     if converterItem then
         local converterCount = 1
         Player.Functions.AddItem(converterItem, converterCount)
         TriggerClientEvent('inventory:client:ItemBox', src, QBCore.Shared.Items[converterItem], 'add')
-        addReward(converterItem, converterCount)
     end
 
     -- Materials (scale with level + vehicle class)
@@ -212,7 +268,6 @@ RegisterNetEvent('k-catjob:server:FinishJob', function(spotIndex, vehCoords, veh
         local matName = Config.Rewards.Materials[math.random(1, #Config.Rewards.Materials)]
         Player.Functions.AddItem(matName, 1)
         TriggerClientEvent('inventory:client:ItemBox', src, QBCore.Shared.Items[matName], 'add')
-        addReward(matName, 1)
     end
 
     -- XP gain (scaled by level + vehicle class)
@@ -224,13 +279,68 @@ RegisterNetEvent('k-catjob:server:FinishJob', function(spotIndex, vehCoords, veh
     SetXP(Player, newXP)
     local newLevel = GetLevelFromXP(newXP)
 
-    -- Instead of QBCore notifications, show an NUI toast with items + XP summary
-    TriggerClientEvent('k-catjob:client:ShowJobRewards', src, {
-        rewards  = rewardsSummary,
-        xpGained = gainedXP,
-        oldLevel = oldLevel,
-        newLevel = newLevel,
-    })
+    -- Put player on cooldown after a successful cut
+    SetPlayerCooldown(citizenid)
+
+    -- Optionally you could notify XP gain here, but you requested no popup.
+    -- You can inspect metadata or shop unlocks to feel progression.
+end)
+
+-- ========= SELL CONVERTERS FOR INKEDBILLS =========
+
+RegisterNetEvent('k-catjob:server:SellConverters', function()
+    local src = source
+    local Player = QBCore.Functions.GetPlayer(src)
+    if not Player then return end
+
+    if not Config.Sell or not Config.Sell.Enabled then
+        TriggerClientEvent('QBCore:Notify', src, "This buyer is currently closed.", 'error')
+        return
+    end
+
+    local itemName = Config.Sell.ConverterItem or Config.Rewards.ConverterItem or 'catalytic_converter'
+    local item = Player.Functions.GetItemByName(itemName)
+    if not item or (item.amount or 0) <= 0 then
+        TriggerClientEvent('QBCore:Notify', src, "You don't have any converters to sell.", 'error')
+        return
+    end
+
+    local sellCount     = item.amount
+    local billsMin      = Config.Sell.MinDirtyPer or 1
+    local billsMax      = Config.Sell.MaxDirtyPer or billsMin
+    local dirtyItemName = Config.Sell.DirtyItem or 'inkedbills'
+
+    if billsMin < 0 then billsMin = 0 end
+    if billsMax < billsMin then billsMax = billsMin end
+
+    -- Calculate total Inkedbills payout as item count
+    local totalBills = 0
+    for _ = 1, sellCount, 1 do
+        totalBills = totalBills + math.random(billsMin, billsMax)
+    end
+
+    if totalBills <= 0 then
+        TriggerClientEvent('QBCore:Notify', src, "No payout calculated for this sale.", 'error')
+        return
+    end
+
+    -- Try to give Inkedbills first
+    if not Player.Functions.AddItem(dirtyItemName, totalBills) then
+        TriggerClientEvent('QBCore:Notify', src, "You don't have enough space to hold the Inkedbills.", 'error')
+        return
+    end
+
+    -- Remove all converters being sold after we successfully added Inkedbills
+    Player.Functions.RemoveItem(itemName, sellCount)
+    TriggerClientEvent('inventory:client:ItemBox', src, QBCore.Shared.Items[itemName], 'remove')
+    TriggerClientEvent('inventory:client:ItemBox', src, QBCore.Shared.Items[dirtyItemName], 'add')
+
+    TriggerClientEvent(
+        'QBCore:Notify',
+        src,
+        ("You sold %d converters and received %d Inkedbills."):format(sellCount, totalBills),
+        'success'
+    )
 end)
 
 -- ========= SHOP CALLBACKS / XP CALLBACK =========
@@ -248,15 +358,15 @@ QBCore.Functions.CreateCallback('k-catjob:server:GetShopItems', function(source,
 
     local visibleItems = {}
     for _, item in ipairs(Config.ShopItems) do
-        if level >= item.level then
+        if level >= (item.level or 1) then
             local itemDef = QBCore.Shared.Items[item.name]
             local img = itemDef and itemDef.image or (item.image or (item.name .. ".png"))
 
             visibleItems[#visibleItems+1] = {
                 name  = item.name,
                 label = item.label or item.name,
-                price = item.price,
-                level = item.level,
+                price = item.price or 0,
+                level = item.level or 1,
                 image = img,
             }
         end
@@ -286,12 +396,13 @@ RegisterNetEvent('k-catjob:server:BuyItem', function(itemName)
         return
     end
 
-    if level < shopItem.level then
+    if level < (shopItem.level or 1) then
         TriggerClientEvent('QBCore:Notify', src, "You are not a high enough level to buy this.", 'error')
         return
     end
 
-    if Player.PlayerData.money['cash'] < shopItem.price then
+    local price = shopItem.price or 0
+    if price > 0 and Player.PlayerData.money['cash'] < price then
         TriggerClientEvent('QBCore:Notify', src, "You do not have enough cash.", 'error')
         return
     end
@@ -301,7 +412,10 @@ RegisterNetEvent('k-catjob:server:BuyItem', function(itemName)
         return
     end
 
-    Player.Functions.RemoveMoney('cash', shopItem.price, 'scrapper-shop-purchase')
+    if price > 0 then
+        Player.Functions.RemoveMoney('cash', price, 'scrapper-shop-purchase')
+    end
+
     TriggerClientEvent('inventory:client:ItemBox', src, QBCore.Shared.Items[shopItem.name], 'add')
     TriggerClientEvent('QBCore:Notify', src, "Purchase successful.", 'success')
 end)
@@ -334,33 +448,18 @@ QBCore.Functions.CreateCallback('k-catjob:server:GetUIData', function(source, cb
 
     local visibleItems = {}
     for _, item in ipairs(Config.ShopItems) do
-        if level >= item.level then
+        if level >= (item.level or 1) then
             local itemDef = QBCore.Shared.Items[item.name]
             local img = itemDef and itemDef.image or (item.image or (item.name .. ".png"))
 
             visibleItems[#visibleItems+1] = {
                 name  = item.name,
                 label = item.label or item.name,
-                price = item.price,
-                level = item.level,
+                price = item.price or 0,
+                level = item.level or 1,
                 image = img,
             }
         end
-    end
-
-    local cid = Player.PlayerData.citizenid
-    local jobData = ActiveJobs[cid]
-    local jobInfo
-
-    if jobData then
-        jobInfo = {
-            hasJob      = true,
-            targetModel = jobData.targetModel,
-            tierIndex   = jobData.tierIndex,
-            tierLabel   = jobData.tierLabel,
-        }
-    else
-        jobInfo = { hasJob = false }
     end
 
     cb({
@@ -368,14 +467,14 @@ QBCore.Functions.CreateCallback('k-catjob:server:GetUIData', function(source, cb
         level     = level,
         nextXP    = nextXP,
         shopItems = visibleItems,
-        job       = jobInfo,
     })
 end)
 
 -- ========= USEABLE ITEM =========
 
 CreateThread(function()
-    QBCore.Functions.CreateUseableItem(Config.RequiredToolItem, function(source, item)
+    local toolItem = Config.RequiredToolItem or 'catsaw'
+    QBCore.Functions.CreateUseableItem(toolItem, function(source, item)
         local Player = QBCore.Functions.GetPlayer(source)
         if not Player then return end
 
